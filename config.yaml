@@ -1,0 +1,28 @@
+# Data
+class_names: 
+  value: ['A','B','C']
+data_paths:
+  values: ['/path/to/dataset/fold_0','/path/to/dataset/fold_1','...']
+device:
+  value: 'mps'
+num_classes: 
+  value: 3
+save_path:
+  value: '/path/where/models/are/saved'
+# Metric
+metric_list: 
+  value: ['auc','loss','macro_f1_score','precision_A','precision_B','precision_C','recall_A','recall_B','recall_C','weighted_f1_score']
+# Training
+batch_size : 
+  values: [32,64]
+epochs : 
+  values: [100,150]
+lr : 
+  value: 3e-3
+seed :
+  value: 0
+# Backbone (example of extra config section)
+dim_h :  
+  values: [16,32]
+dropout : 
+  value: 0.1
