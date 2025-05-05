@@ -3,6 +3,7 @@ from functools import partial
 import numpy as np
 import os
 import random
+import shutil
 from sklearn.metrics import classification_report, mean_squared_error, mean_absolute_error, roc_auc_score
 import torch
 from torch.nn import Softmax
@@ -36,11 +37,101 @@ class Config_Parser():
         """ Verify the integrity of a config file. """
         return True 
 
+class Fold_Manager():
+    """ Create and pre-process the folds prior to cross-validation. """
+
+    def __init__(self,config:dict):
+        self.config = config
+    
+    def is_created(self):
+        """ Boolean indicator if the fold structure has been created. """
+        return os.path.exists(os.path.join(self.config['fold_root_dir'],'0'))
+
+    def fold_creation(self,input_dir:str,output_dir:str,
+                       label_data_path:str,
+                       seed:int=0,folds_nb:int=4):
+        """ Split training data in folds with stratification on labels and simulation for cross-validation.
+        
+            :param input_dir: Directory with the train processed data.
+            :param output_dir: Directory where the folds folders will be created.
+            :param label_data_path: Location of the dataset containing the data to retrieve labels.
+            :param seed: Seed to control reproducibility.
+            :param folds_nb: Number of partition to create.
+            
+        """
+        # Sanity check
+        if self.is_created():
+            return
+        # Patient level files
+        file_list = [(os.path.join(input_dir,f),f) for f in os.listdir(input_dir) if f.endswith('.csv')]
+        simulation_file_dict = dict()
+        for f_path, f_name in file_list:
+            sim_id = int(f_name.split('_')[0])
+            if sim_id not in simulation_file_dict:
+                simulation_file_dict[sim_id] = []
+            simulation_file_dict[sim_id].append((f_path,f_name))
+        # Retrieve label mapping and filter out patients without labels
+        labels_df = pd.read_csv(label_data_path).set_index('p_id')
+        ids_to_delete = set(simulation_file_dict.keys()).difference(labels_df.index)
+        for sim_id in ids_to_delete:
+            del simulation_file_dict[sim_id]
+        # Regroup patient per label
+        stratified_files = dict()
+        for sim_id, _ in simulation_file_dict.items():
+            sim_label = labels_df.loc[sim_id]['label']
+            if sim_label not in stratified_files:
+                stratified_files[sim_label] = []
+            stratified_files[sim_label].append(sim_id)
+        # Shuffle label-associated file lists
+        generator = np.random.default_rng(seed)
+        for label in stratified_files.keys():
+            generator.shuffle(stratified_files[label])
+        # Split per fold
+        for i in range(folds_nb):
+            fold_train_simulations = []
+            fold_val_simulations = []
+            for _, sim_ids in stratified_files.items():
+                label_step_size = int(np.ceil(len(sim_ids)/folds_nb))
+                fold_train_simulations.extend(sim_ids[0:i*label_step_size]+sim_ids[(i+1)*label_step_size:])
+                fold_val_simulations.extend(sim_ids[i*label_step_size:(i+1)*label_step_size])
+            # Retrieve files from patients
+            fold_train_files = []
+            fold_val_files = []
+            for sim_id in fold_train_simulations:
+                fold_train_files.extend(simulation_file_dict[sim_id])
+            for sim_id in fold_val_simulations:
+                fold_val_files.extend(simulation_file_dict[sim_id])
+            # Copy files to directory structure
+            fold_files = {'train':fold_train_files,'val':fold_val_files}
+            fold_path = os.path.join(output_dir,str(i))
+            os.mkdir(fold_path)
+            for split_type in ['train','val']:
+                split_path = os.path.join(fold_path,split_type)
+                split_files_path = os.path.join(split_path,'raw')
+                split_processed_path = os.path.join(split_path,'processed')
+                os.mkdir(split_path)
+                os.mkdir(split_files_path)
+                os.mkdir(split_processed_path)
+                for file_path, file_name in fold_files[split_type]:
+                    shutil.copyfile(file_path,os.path.join(split_files_path,file_name))
+
+    def process_folds(self):
+        """ Process each folds individually. """
+        if not self.is_created():
+            self.fold_creation()
+        root_dir = self.config['fold_root_dir']
+        for fold_id in [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir,d))]:
+            fold_dir = os.path.join(root_dir,fold_id)
+            for split in [d for d in os.listdir(fold_dir) if os.path.isdir(os.path.join(fold_dir,d))]:
+                split_dir = os.path.join(fold_dir,split)
+                Dataset(split_dir,self.config)
+
 class Grid_Search():
     """ Grid search object that implements cross-validation search with WandB sweeps. """
     
     def __init__(self,config_path:str,name:str,method:str='grid'):
         self.config = Config_Parser(config_path).parse_config()
+        self.fold_manager = Fold_Manager(self.config).process_folds()
         self.method = method
         self.name = name
 
@@ -228,7 +319,7 @@ class Metric_Calculator():
         return metric_dict
 
 class Trainer():
-    """ Class to perform cross-validation training. """
+    """ Class to perform the training for one given fold. """
 
     def __init__(self,config:Config,fold_id:int):
         self.config = config
