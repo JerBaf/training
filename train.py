@@ -9,7 +9,153 @@ from torch.nn import Softmax
 from torch.utils.data import Dataset, WeightedRandomSampler
 import wandb
 from wandb.sdk.wandb_config import Config
+import yaml
 
+class Config_Parser():
+    """ Parse and verify integrity of a config file. """
+
+    def __init__(self,config_path:str):
+        self.config_path = config_path
+
+    def parse_config(self) -> dict:
+        """ Parse and validate the config file given at initialization. """
+        # Parse config
+        with open(self.config_path,'r') as stream:
+            try:
+                config = yaml.safe_load(stream)
+            except yaml.YAMLError as exc:
+                raise exc
+        # Validate config integrity
+        try:
+            self.validate_config(config)
+            return config
+        except Exception as exc:
+            raise exc
+            
+    def validate_config(self,config:dict) -> bool:
+        """ Verify the integrity of a config file. """
+        return True 
+
+class Grid_Search():
+    """ Grid search object that implements cross-validation search with WandB sweeps. """
+    
+    def __init__(self,config_path:str,name:str,method:str='grid'):
+        self.config = Config_Parser(config_path).parse_config()
+        self.method = method
+        self.name = name
+
+    def create_sweep_config(self) -> dict:
+        """ Create the sweep config for the wandb grid search.
+        
+            :param config: Dictionnary with the parameters list and their corresponding list of value to be tested.
+            :param method: Method for the search of hyperparameter, default is grid.
+            
+            :return: Sweep config for wandb agent in dictionnary format.
+        
+        """
+        sweep_config = {'method': self.method}
+        metric = {'name': 'Loss','goal': 'minimize'}
+        sweep_config['metric'] = metric
+        sweep_config['parameters'] = self.config
+        return sweep_config
+
+    def launch(self):
+        """ Hyper parameter search with cross-validation for a GNN. """
+        # Process to cross validation
+        std_dict = dict()
+        config = self.config
+        for fold_id in range(len(config['data_paths']['values'][0])):
+            # Instantiate metric registration
+            sweep_config = self.create_sweep_config()
+            sweep_id = wandb.sweep(sweep_config, project=self.name)
+            # Launch training
+            wandb.agent(sweep_id,partial(self.training_single_fold,fold_id=fold_id,std_dict=std_dict))
+        # Log standard deviations
+        sweep_config = self.create_sweep_config()
+        sweep_id = wandb.sweep(sweep_config, project=self.name)
+        wandb.agent(sweep_id,partial(self.std_logging,std_dict=std_dict))
+
+    def std_logging(config:Config=None,std_dict:dict=dict()):
+        """ Register the std for all metrics. """
+        # Log standard deviations
+        with wandb.init(config=config):
+            for metric_key, metric_values in std_dict.items():
+                wandb.log({f'{metric_key}_std':np.std(metric_values)})
+            
+    def training_single_fold(config:Config=None,fold_id:int=0,std_dict:dict=dict()):
+        """ Training and metric registration for a single fold
+            
+            :param config: Wandb config for the hyperparameter search.
+            :param fold_id: Id of the fold for this training.
+            :param std_dict: Dictionnary to keep track of metric values for latter std computation.
+        
+        """
+        with wandb.init(config=config):
+            config = wandb.config
+            # Perform training
+            trainer = Trainer(config,fold_id)
+            trainer.train()
+            # Assign target specific variables
+            metric_list = trainer.logger.get_metric_list()
+            fold_metric_dict = trainer.logger.fold_metric_dict
+            # Log global metrics
+            global_metric_dict = dict()
+            for metric_name, metric_values in fold_metric_dict.items():
+                if metric_name in metric_list:
+                    if config.task_type == 'categorical':
+                        if 'loss' in metric_name:
+                            metric_key = f'min_{metric_name}'
+                            global_metric_dict[metric_key] = np.min(metric_values)
+                        else:
+                            metric_key = f'max_{metric_name}'
+                            global_metric_dict[metric_key] = np.max(metric_values)
+                    else:
+                        metric_key = f'min_{metric_name}'
+                        global_metric_dict[metric_key] = np.min(metric_values)
+                    # Register to standard deviation dictionnary
+                    if metric_key not in std_dict:
+                        std_dict[metric_key] = []
+                    std_dict[metric_key].append(np.min(metric_values))
+            wandb.log(global_metric_dict)
+            wandb.log({'fold_id':fold_id})
+    
+class Logger():
+    """ Class to log the results through wandb. """
+
+    def __init__(self,config:Config):
+        self.config = config
+        self.fold_metric_dict = self.create_metric_dict()
+        self.metric_list = config.metric_list
+
+    def create_metric_dict(self) -> dict:
+        """ Create a dictionnary to register metrics. """
+        metric_list = self.get_metric_list()
+        return dict(zip(metric_list,[list() for _ in range(len(metric_list))]))
+    
+    def get_metric_list(self) -> list:
+        """ Get the list of metrics. """
+        full_metric_list = []
+        full_metric_list.extend(['train_'+m for m in self.metric_list])
+        full_metric_list.extend(['val_'+m for m in self.metric_list])
+        return full_metric_list
+     
+    def log_confusion_matrix(self,pred_dict:dict):
+        """ Register the confusion matrices on wandb. """
+        if self.config.task_type == 'classification':
+            for split in ['train','val']:
+                y_true, y_pred = pred_dict[split]['y_true'], pred_dict[split]['y_pred']
+                wandb.log({f"{split}_conf_mat" : wandb.plot.confusion_matrix(probs=None,
+                                                    y_true=y_true, preds=y_pred,
+                                                    class_names=self.config.class_names)})
+
+    def update_metrics(self,metric_values:dict,prefix:str):
+        """ Update and register the metrics on wandb. """
+        metric_dict = dict()
+        # Metrics Registration
+        for metric_name, metric_value in metric_values.items():
+            metric_dict[f'{prefix}_{metric_name}'] = metric_value
+            self.fold_metric_dict[f'{prefix}_{metric_name}'].append(metric_value)
+        wandb.log(metric_dict)
 
 class Metric_Calculator():
     """ Compute the metrics before passing them to optimizer and logger. """
@@ -80,44 +226,6 @@ class Metric_Calculator():
         metric_dict['mse'] = mse
         metric_dict['mae'] = mae
         return metric_dict
-
-class Logger():
-    """ Class to log the results through wandb. """
-
-    def __init__(self,config:Config):
-        self.config = config
-        self.fold_metric_dict = self.create_metric_dict()
-        self.metric_list = config.metric_list
-
-    def create_metric_dict(self) -> dict:
-        """ Create a dictionnary to register metrics. """
-        metric_list = self.get_metric_list()
-        return dict(zip(metric_list,[list() for _ in range(len(metric_list))]))
-    
-    def get_metric_list(self) -> list:
-        """ Get the list of metrics. """
-        full_metric_list = []
-        full_metric_list.extend(['train_'+m for m in self.metric_list])
-        full_metric_list.extend(['val_'+m for m in self.metric_list])
-        return full_metric_list
-     
-    def log_confusion_matrix(self,pred_dict:dict):
-        """ Register the confusion matrices on wandb. """
-        if self.config.task_type == 'classification':
-            for split in ['train','val']:
-                y_true, y_pred = pred_dict[split]['y_true'], pred_dict[split]['y_pred']
-                wandb.log({f"{split}_conf_mat" : wandb.plot.confusion_matrix(probs=None,
-                                                    y_true=y_true, preds=y_pred,
-                                                    class_names=self.config.class_names)})
-
-    def update_metrics(self,metric_values:dict,prefix:str,y_true:list=None,y_pred:list=None):
-        """ Update and register the metrics on wandb. """
-        metric_dict = dict()
-        # Metrics Registration
-        for metric_name, metric_value in metric_values.items():
-            metric_dict[f'{prefix}_{metric_name}'] = metric_value
-            self.fold_metric_dict[f'{prefix}_{metric_name}'].append(metric_value)
-        wandb.log(metric_dict)
 
 class Trainer():
     """ Class to perform cross-validation training. """
@@ -235,85 +343,3 @@ class Trainer():
         generator.manual_seed(seed)
         return generator
 
-# Grid Search Helpers
-
-def create_sweep_config(parameters_dict:dict,method:str='grid') -> dict:
-    """ Create the sweep config for the wandb grid search.
-    
-        :param parameters_dict: Dictionnary with the parameters list and
-                                their corresponding list of value to be tested.
-        :param method: Method for the search of hyperparameter, default is grid.
-        
-        :return: Sweep config for wandb agent in dictionnary format.
-    
-    """
-    
-    sweep_config = {
-    'method': method
-    }
-    metric = {
-    'name': 'MeanSquareError',
-    'goal': 'minimize'   
-    }
-    sweep_config['metric'] = metric
-    sweep_config['parameters'] = parameters_dict
-    return sweep_config
-
-def std_logging(config:Config=None,std_dict:dict=dict()):
-    """ Register the std for all metrics. """
-    # Log standard deviations
-    with wandb.init(config=config):
-        for metric_key, metric_values in std_dict.items():
-            wandb.log({f'{metric_key}_std':np.std(metric_values)})
-
-def training_pipeline(parameters_dict:dict,project_name:str,method:str='grid'):
-    """ Hyper parameter search with cross-validation for a GNN. """
-    # Process to cross validation
-    std_dict = dict()
-    for fold_id in range(len(parameters_dict['data_paths']['values'][0])):
-        # Instantiate metric registration
-        sweep_config = create_sweep_config(parameters_dict,method=method)
-        sweep_id = wandb.sweep(sweep_config, project=project_name)
-        # Launch training
-        wandb.agent(sweep_id,partial(training_single_fold,fold_id=fold_id,std_dict=std_dict))
-    # Log standard deviations
-    sweep_config = create_sweep_config(parameters_dict,method=method)
-    sweep_id = wandb.sweep(sweep_config, project=project_name)
-    wandb.agent(sweep_id,partial(std_logging,std_dict=std_dict))
-
-def training_single_fold(config:Config=None,fold_id:int=0,std_dict:dict=dict()):
-    """ Training and metric registration for a single fold
-        
-        :param config: Wandb config for the hyperparameter search.
-        :param fold_id: Id of the fold for this training.
-        :param std_dict: Dictionnary to keep track of metric values for latter std computation.
-    
-    """
-    with wandb.init(config=config):
-        config = wandb.config
-        # Perform training
-        trainer = Trainer(config,fold_id)
-        trainer.train()
-        # Assign target specific variables
-        metric_list = trainer.logger.get_metric_list()
-        fold_metric_dict = trainer.logger.fold_metric_dict
-        # Log global metrics
-        global_metric_dict = dict()
-        for metric_name, metric_values in fold_metric_dict.items():
-            if metric_name in metric_list:
-                if config.task_type == 'categorical':
-                    if 'loss' in metric_name:
-                        metric_key = f'min_{metric_name}'
-                        global_metric_dict[metric_key] = np.min(metric_values)
-                    else:
-                        metric_key = f'max_{metric_name}'
-                        global_metric_dict[metric_key] = np.max(metric_values)
-                else:
-                    metric_key = f'min_{metric_name}'
-                    global_metric_dict[metric_key] = np.min(metric_values)
-                # Register to standard deviation dictionnary
-                if metric_key not in std_dict:
-                    std_dict[metric_key] = []
-                std_dict[metric_key].append(np.min(metric_values))
-        wandb.log(global_metric_dict)
-        wandb.log({'fold_id':fold_id})
