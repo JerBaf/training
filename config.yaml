@@ -11,7 +11,13 @@ save_path:
   value: '/path/where/models/are/saved'
 # Metric
 metric_list: 
-  value: ['auc','loss','macro_f1_score','precision_A','precision_B','precision_C','recall_A','recall_B','recall_C','weighted_f1_score']
+  value: ['auc','label','loss','macro_f1_score','precision_A','precision_B','precision_C','pred','recall_A','recall_B','recall_C','weighted_f1_score']
+save_mode:
+  value: 'max'
+target_metric:
+  value: 'macro_f1_score'
+task_type:
+  value: 'classification'
 # Training
 batch_size : 
   values: [32,64]
