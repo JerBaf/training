@@ -102,12 +102,15 @@ class Fold_Manager():
         """ Process each folds individually. """
         if not self.is_created():
             self.fold_creation()
-        root_dir = self.config['fold_root_dir']
+        root_dir = self.config['data_path']
         for fold_id in [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir,d))]:
-            fold_dir = os.path.join(root_dir,fold_id)
-            for split in [d for d in os.listdir(fold_dir) if os.path.isdir(os.path.join(fold_dir,d))]:
-                split_dir = os.path.join(fold_dir,split)
-                Dataset(split_dir,self.config)
+            fold_path = os.path.join(root_dir,fold_id)
+            _, _ = Fold_Manager.get_fold_dataset(fold_path)
+     
+    @classmethod
+    def get_fold_dataset(cls,fold_path:str) -> tuple:
+        """ Retrieve the train and validation dataset for a given fold. """
+        return None, None
 
 class Grid_Search():
     """ Grid search object that implements cross-validation search with WandB sweeps. """
@@ -334,8 +337,9 @@ class Trainer():
         return None
 
     def get_datasets(self) -> tuple :
-        """ Retrieve the train and validation dataset for a given fold. """
-        return None, None
+        """ Retrieve the train and validation dataset. """
+        fold_path = os.path.join(self.config.data_path,self.fold_id)
+        return Fold_Manager.get_fold_dataset(fold_path)
 
     def get_dataloaders(self,generator:torch.Generator) -> tuple:
         """ Retrieve the train and validation dataloaders for a given fold. """
