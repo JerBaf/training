@@ -16,6 +16,12 @@ import yaml
 class Config_Parser():
     """ Parse and verify integrity of a config file. """
 
+    CLASSIFICATION_KEYS = {'class_names','num_classes'}
+    MANDATORY_KEYS = {'data_path','device','label_path','num_folds','raw_data_path',
+                      'save_path','metric_list','save_mode','target_metric',
+                      'task_type','batch_size','epochs','lr','seed'}
+    PATH_TO_VALIDATE = ['data_path','label_path','raw_data_path','save_path']
+    
     def __init__(self,config_path:str):
         self.config_path = config_path
 
@@ -36,7 +42,41 @@ class Config_Parser():
             
     def validate_config(self,config:dict) -> bool:
         """ Verify the integrity of a config file. """
+        # Check required entries
+        missing_entries = self.MANDATORY_KEYS.difference(set(config.keys()))
+        if missing_entries:
+            raise ValueError(f'The config is missing the following entries: {missing_entries}')
+        classification_missing_entries = self.CLASSIFICATION_KEYS.difference(set(config.keys()))
+        if config['task_type'] == 'classification' and classification_missing_entries:
+            raise ValueError(f'The config is missing the following entries: {classification_missing_entries}')
+        # Check validaty of 'values' entries
+        for key, values_dict in config.items():
+            if 'values' in values_dict and type(values_dict['values']) != list:
+                raise ValueError(f"The config entry {key} has 'values' specified but no list of parameters is given.")
+        # Check path is correct
+        for path in self.PATH_TO_VALIDATE:
+            self.validate_path(config,path)
+        # Check label file 
+        self.validate_labels(config)
         return True 
+    
+    def validate_labels(self,config:dict):
+        """ Validate the format of the label files. """
+        label_files = self.config['label_path']['values'] if 'values' in config['label_path'] else [config['label_path']['value']]
+        for l in label_files:
+            try: 
+                label_df = pd.read_csv(l)
+                label_df.set_index('id')
+                label_df['label'].value_counts()
+            except:
+                raise ValueError(f'Impossible to read the label file {l}. Please check format and the corresponding README section.')
+
+    def validate_path(self,config:dict,config_key:str):
+        paths_to_check = self.config[config_key]['values'] if 'values' in config[config_key] else [config[config_key]['value']]
+        for path in paths_to_check:
+            if not os.path.exists(path):
+                raise ValueError(f'The config provided non existing path(s) for entry {config_key}: {path}. Please create it(them) prior to processing.')
+        """ Raise an Exception if the provided path is not valid. """
 
 class Fold_Manager():
     """ Create and pre-process the folds prior to cross-validation. """
@@ -199,6 +239,8 @@ class Grid_Search():
 class Logger():
     """ Class to log the results through wandb. """
 
+    CLASS_ASSOCIATED_METRICS = {'recall','precision'}
+
     def __init__(self,config:Config):
         self.config = config
         self.fold_metric_dict = self.create_metric_dict()
@@ -212,8 +254,12 @@ class Logger():
     def get_metric_list(self) -> list:
         """ Get the list of metrics. """
         full_metric_list = []
-        full_metric_list.extend(['train_'+m for m in self.metric_list])
-        full_metric_list.extend(['val_'+m for m in self.metric_list])
+        for m in self.metric_list:
+            if m in self.CLASS_ASSOCIATED_METRICS:
+                for c in self.config.class_names:
+                    full_metric_list.extend([f'train_{m}_{c}',f'val_{m}_{c}'])
+            else:
+                full_metric_list.extend([f'train_{m}',f'val_{m}'])
         return full_metric_list
      
     def log_confusion_matrix(self,pred_dict:dict):
