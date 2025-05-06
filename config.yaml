@@ -1,12 +1,18 @@
 # Data
 class_names: 
   value: ['A','B','C']
-data_paths:
-  values: ['/path/to/dataset/fold_0','/path/to/dataset/fold_1','...']
+data_path:
+  value: '/path/to/fold/saving/location'
 device:
   value: 'mps'
+label_path:
+  value: '/path/to/label/file'
 num_classes: 
   value: 3
+num_folds:
+  value: 4
+raw_data_path:
+  value: '/path/to/non/processed/data/location'
 save_path:
   value: '/path/where/models/are/saved'
 # Metric
