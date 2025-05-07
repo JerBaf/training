@@ -148,7 +148,7 @@ class Fold_Manager():
             _, _ = Fold_Manager.get_fold_dataset(fold_path)
      
     @classmethod
-    def get_fold_dataset(cls,fold_path:str) -> tuple:
+    def get_fold_dataset(cls,fold_path:str,label_path:str) -> tuple:
         """ Retrieve the train and validation dataset for a given fold. """
         return None, None
 
