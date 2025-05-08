@@ -1,10 +1,10 @@
 # Data
 class_names: 
   value: ['A','B','C']
-data_path:
-  value: '/path/to/fold/saving/location'
 device:
   value: 'mps'
+fold_root_path:
+  value: '/path/to/fold/saving/location'
 label_path:
   value: '/path/to/label/file'
 num_classes: 

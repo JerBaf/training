@@ -9,6 +9,7 @@ from sklearn.metrics import classification_report, mean_squared_error, mean_abso
 import torch
 from torch.nn import Softmax
 from torch.utils.data import Dataset, WeightedRandomSampler
+from typing import Optional
 import wandb
 from wandb.sdk.wandb_config import Config
 import yaml
@@ -17,10 +18,11 @@ class Config_Parser():
     """ Parse and verify integrity of a config file. """
 
     CLASSIFICATION_KEYS = {'class_names','num_classes'}
-    MANDATORY_KEYS = {'data_path','device','label_path','num_folds','raw_data_path',
+    MANDATORY_KEYS = {'device','fold_root_path','label_path','num_folds','raw_data_path',
                       'save_path','metric_list','save_mode','target_metric',
                       'task_type','batch_size','epochs','lr','seed'}
-    PATH_TO_VALIDATE = ['data_path','label_path','raw_data_path','save_path']
+    PATH_KEYS = {'fold_root_path','label_path','raw_data_path','save_path'}
+    VALUE_ONLY_KEYS = CLASSIFICATION_KEYS.union(PATH_KEYS).union({'device','num_folds','metric_list','save_mode','target_metric','task_type'})
     
     def __init__(self,config_path:str):
         self.config_path = config_path
@@ -32,13 +34,13 @@ class Config_Parser():
             try:
                 config = yaml.safe_load(stream)
             except yaml.YAMLError as exc:
-                raise exc
+                raise ValueError(f"Impossible to parse config in {self.config_path}") from exc
         # Validate config integrity
         try:
             self.validate_config(config)
             return config
         except Exception as exc:
-            raise exc
+            raise ValueError(f"Invalid config configuration") from exc
             
     def validate_config(self,config:dict) -> bool:
         """ Verify the integrity of a config file. """
@@ -53,30 +55,39 @@ class Config_Parser():
         for key, values_dict in config.items():
             if 'values' in values_dict and type(values_dict['values']) != list:
                 raise ValueError(f"The config entry {key} has 'values' specified but no list of parameters is given.")
+        # Check value entry
+        self.validate_value_entry()
         # Check path is correct
-        for path in self.PATH_TO_VALIDATE:
-            self.validate_path(config,path)
+        self.validate_path(config)
         # Check label file 
         self.validate_labels(config)
         return True 
     
     def validate_labels(self,config:dict):
         """ Validate the format of the label files. """
-        label_files = self.config['label_path']['values'] if 'values' in config['label_path'] else [config['label_path']['value']]
+        label_files = config['label_path']['values'] if 'values' in config['label_path'] else [config['label_path']['value']]
         for l in label_files:
             try: 
                 label_df = pd.read_csv(l)
                 label_df.set_index('id')
                 label_df['label'].value_counts()
             except:
-                raise ValueError(f'Impossible to read the label file {l}. Please check format and the corresponding README section.')
+                raise ValueError(f'Impossible to read and parse correctly the label file {l}. Please check format and the corresponding README section.')
 
-    def validate_path(self,config:dict,config_key:str):
-        paths_to_check = self.config[config_key]['values'] if 'values' in config[config_key] else [config[config_key]['value']]
-        for path in paths_to_check:
-            if not os.path.exists(path):
-                raise ValueError(f'The config provided non existing path(s) for entry {config_key}: {path}. Please create it(them) prior to processing.')
+    def validate_path(self,config:dict):
         """ Raise an Exception if the provided path is not valid. """
+        for path in list(self.PATH_KEYS):
+            if 'values' in config[path]:
+                raise ValueError(f"The config file has multiple paths for entry {path}. Only support one path at a time with 'value' keyword.")
+            path = config[path]['value']
+            if not os.path.exists(path) and not (path == 'save_path' and path == ''):
+                raise ValueError(f'The config provided non existing path for entry {path}: {path}. Please create it prior to processing.')
+        
+    def validate_value_entry(self,config:dict):
+        """ Verify that all entries requiring value only are valid. """ 
+        for key in list(self.VALUE_ONLY_KEYS):
+            if not 'value' in config[key]:
+                raise ValueError(f"The config has entry {key} without a 'value' type of item. Please provide only value only item.")
 
 class Fold_Manager():
     """ Create and pre-process the folds prior to cross-validation. """
@@ -86,18 +97,19 @@ class Fold_Manager():
     
     def is_created(self):
         """ Boolean indicator if the fold structure has been created. """
-        return os.path.exists(os.path.join(self.config['fold_root_dir'],'0'))
+        fold_root_path = self.config['fold_root_path']['value']
+        return os.path.exists(os.path.join(fold_root_path,'0'))
 
-    def fold_creation(self):
+    def fold_creation(self,fold_root_path:str,raw_data_path:str):
         """ Split training data in folds with stratification on labels for cross-validation. """
         # Sanity check
         if self.is_created():
             return
         # List files
-        file_dict = dict([(f.strip('.csv'),os.path.join(self.config.raw_data_path,f)) 
-                          for f in os.listdir(self.config.raw_data_path)])
+        file_dict = dict([(f.strip('.csv'),os.path.join(raw_data_path,f)) for f in os.listdir(raw_data_path)])
         # Retrieve label mapping
-        labels_df = pd.read_csv(self.config.label_path).set_index('id')
+        label_path = self.config['label_path']['value']
+        labels_df = pd.read_csv(label_path).set_index('id')
         # Regroup files per label
         stratified_files = dict()
         for file_id in file_dict.keys():
@@ -106,15 +118,17 @@ class Fold_Manager():
                 stratified_files[file_label] = []
             stratified_files[file_label].append(file_id)
         # Shuffle label-associated file lists
-        generator = np.random.default_rng(self.config.seed)
+        seed = self.config['seed']['values'][0] if 'values' in self.config['seed'] else self.config['seed']['value']
+        generator = np.random.default_rng(seed)
         for label in stratified_files.keys():
             generator.shuffle(stratified_files[label])
         # Split per fold
-        for i in range(self.config.num_folds):
+        num_folds = self.config['num_folds']['values'][0] if 'values' in self.config['num_folds'] else self.config['num_folds']['value']
+        for i in range(num_folds):
             fold_train_ids = []
             fold_val_ids = []
             for _, file_ids in stratified_files.items():
-                label_step_size = int(np.ceil(len(file_ids)/self.config.num_folds))
+                label_step_size = int(np.ceil(len(file_ids)/num_folds))
                 fold_train_ids.extend(file_ids[0:i*label_step_size]+file_ids[(i+1)*label_step_size:])
                 fold_val_ids.extend(file_ids[i*label_step_size:(i+1)*label_step_size])
             # Retrieve files from label stratification
@@ -126,7 +140,7 @@ class Fold_Manager():
                 fold_val_files.append((file_id,file_dict[file_id]))
             # Copy files to directory structure
             fold_files = {'train':fold_train_files,'val':fold_val_files}
-            fold_path = os.path.join(self.config.data_path,str(i))
+            fold_path = os.path.join(fold_root_path,str(i))
             os.mkdir(fold_path)
             for split_type in ['train','val']:
                 split_path = os.path.join(fold_path,split_type)
@@ -140,12 +154,15 @@ class Fold_Manager():
 
     def process_folds(self):
         """ Process each folds individually. """
+        fold_root_path = self.config['fold_root_path']['value']
+        label_path = self.config['label_path']['value']
+        raw_data_path = self.config['raw_data_path']['value']
         if not self.is_created():
-            self.fold_creation()
-        root_dir = self.config['data_path']
-        for fold_id in [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir,d))]:
-            fold_path = os.path.join(root_dir,fold_id)
-            _, _ = Fold_Manager.get_fold_dataset(fold_path)
+            self.fold_creation(fold_root_path,raw_data_path)
+        # Process files
+        for fold_id in [d for d in os.listdir(fold_root_path) if os.path.isdir(os.path.join(fold_root_path,d))]:
+            fold_path = os.path.join(fold_root_path,fold_id)
+            _, _ = Fold_Manager.get_fold_dataset(fold_path,label_path)
      
     @classmethod
     def get_fold_dataset(cls,fold_path:str,label_path:str) -> tuple:
@@ -155,9 +172,18 @@ class Fold_Manager():
 class Grid_Search():
     """ Grid search object that implements cross-validation search with WandB sweeps. """
     
-    def __init__(self,config_path:str,name:str,method:str='grid'):
-        self.config = Config_Parser(config_path).parse_config()
-        self.fold_manager = Fold_Manager(self.config).process_folds()
+    def __init__(self,config_path:str,name:str,method:str='grid',config_parser_cls=Config_Parser,
+                 fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator,
+                 trainer_cls=Trainer):
+        # Classes
+        self.config_parser_cls = config_parser_cls
+        self.fold_manager_cls = fold_manager_cls
+        self.logger_cls = logger_cls
+        self.metric_calculator_cls = metric_calculator_cls
+        self.trainer_cls = trainer_cls
+        # Attributes
+        self.config = config_parser_cls(config_path).parse_config()
+        fold_manager_cls(self.config).process_folds()
         self.method = method
         self.name = name
 
@@ -192,14 +218,15 @@ class Grid_Search():
         sweep_id = wandb.sweep(sweep_config, project=self.name)
         wandb.agent(sweep_id,partial(self.std_logging,std_dict=std_dict))
 
-    def std_logging(config:Config=None,std_dict:dict=dict()):
+    def std_logging(self,config:Config=None,std_dict:Optional[dict]=None):
         """ Register the std for all metrics. """
+        std_dict = {} if std_dict is None else std_dict
         # Log standard deviations
         with wandb.init(config=config):
             for metric_key, metric_values in std_dict.items():
                 wandb.log({f'{metric_key}_std':np.std(metric_values)})
             
-    def training_single_fold(config:Config=None,fold_id:int=0,std_dict:dict=dict()):
+    def training_single_fold(self,config:Config=None,fold_id:int=0,std_dict:Optional[dict]=None):
         """ Training and metric registration for a single fold
             
             :param config: Wandb config for the hyperparameter search.
@@ -207,10 +234,11 @@ class Grid_Search():
             :param std_dict: Dictionnary to keep track of metric values for latter std computation.
         
         """
+        std_dict = {} if std_dict is None else std_dict
         with wandb.init(config=config):
             config = wandb.config
             # Perform training
-            trainer = Trainer(config,fold_id)
+            trainer = self.trainer_cls(config,fold_id,self.fold_manager_cls,self.logger_cls,self.metric_calculator_cls)
             trainer.train()
             # Assign target specific variables
             metric_list = trainer.logger.get_metric_list()
@@ -219,7 +247,7 @@ class Grid_Search():
             global_metric_dict = dict()
             for metric_name, metric_values in fold_metric_dict.items():
                 if metric_name in metric_list:
-                    if config.task_type == 'categorical':
+                    if config.task_type == 'classification':
                         if 'loss' in metric_name:
                             metric_key = f'min_{metric_name}'
                             global_metric_dict[metric_key] = np.min(metric_values)
@@ -307,15 +335,19 @@ class Metric_Calculator():
     def compute_classification_metrics(self,y_true:torch.Tensor,y_pred:torch.Tensor) -> dict:
         """ Compute classification related metrics. """
         # Labels and predictions formatting
-        s_func = Softmax(dim=-1)
-        labels = np.concatenate([np.copy(np.array(l.cpu())).argmax(axis=1) for l in y_true],axis=0)
-        probs = np.concatenate([np.copy(np.array(s_func(p.detach().cpu()))) for p in y_pred],axis=0)
-        pred = np.concatenate([np.copy(np.array(p.detach().cpu())).argmax(axis=1) for p in y_pred],axis=0)
+        true_np = y_true.detach().cpu().numpy()
+        pred_np = y_pred.detach().cpu().numpy()
+        if true_np.ndim > 1:
+            labels = true_np.argmax(axis=1)
+        else:
+            labels = true_np.astype(int)
+        probs = Softmax(dim=-1)(torch.from_numpy(pred_np)).numpy()
+        preds = probs.argmax(axis=1)
         # Retrieve label list
         label_list = [str(i) for i in range(self.config.num_classes)] 
         # Metrics computation
         metric_dict = dict()
-        metrics = classification_report(labels,pred,labels=label_list,output_dict=True)
+        metrics = classification_report(labels,preds,labels=label_list,output_dict=True)
         # Compute AUC
         if len(label_list) == 2:
             probs = probs[:,1]
@@ -339,8 +371,8 @@ class Metric_Calculator():
     def compute_regression_metric(self,y_true:torch.Tensor,y_pred:torch.Tensor) -> dict:
         """ Compute regression related metrics. """
         # Labels and predictions formatting
-        labels = np.concatenate([np.copy(np.array(l.cpu())) for l in y_true],axis=0)
-        preds = np.concatenate([np.copy(np.array(p.detach().cpu())) for p in y_pred],axis=0)
+        labels = y_true.detach().cpu().numpy().ravel()
+        preds  = y_pred.detach().cpu().numpy().ravel()
         # Metric computation
         metric_dict = dict()
         mse = mean_squared_error(labels,preds)
@@ -353,26 +385,28 @@ class Metric_Calculator():
 class Trainer():
     """ Class to perform the training for one given fold. """
 
-    def __init__(self,config:Config,fold_id:int):
+    def __init__(self,config:Config,fold_id:int,fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator):
+        # Attributes
         self.config = config
         self.device = torch.device(config.device)
         self.fold_id = fold_id
-        self.metric_calculator = Metric_Calculator(config)
-        self.logger = Logger(config)
+        self.fold_manager_cls = fold_manager_cls
+        self.metric_calculator = metric_calculator_cls(config)
+        self.logger = logger_cls(config)
 
     def create_balanced_sampler(self,dataset) -> WeightedRandomSampler:
         """ Create a balanced sampler for training based on class distribution."""
         labels = dict([(i,0) for i in range(self.config.num_classes)])
         # Compute label distribution
         for idx in range(len(dataset)):
-            data = dataset.get(idx)
+            data = dataset[idx]
             label = torch.argmax(data[-1].y).item()
             labels[label] += 1
         # Compute weights
         weights = dict([(k,len(dataset)/v) for k,v in labels.items()])
         weight_list = []
         for idx in range(len(dataset)):
-            data = dataset.get(idx)
+            data = dataset[idx]
             label = torch.argmax(data[-1].y).item()
             weight_list.append(weights[label])
         return WeightedRandomSampler(weight_list,len(dataset))
@@ -384,8 +418,9 @@ class Trainer():
 
     def get_datasets(self) -> tuple :
         """ Retrieve the train and validation dataset. """
-        fold_path = os.path.join(self.config.data_path,self.fold_id)
-        return Fold_Manager.get_fold_dataset(fold_path)
+        fold_path = os.path.join(self.config.fold_root_path,self.fold_id)
+        label_path = self.config.label_path
+        return self.fold_manager_cls.get_fold_dataset(fold_path,label_path)
 
     def get_dataloaders(self,generator:torch.Generator) -> tuple:
         """ Retrieve the train and validation dataloaders for a given fold. """
@@ -393,7 +428,7 @@ class Trainer():
 
     def get_input_dim(self,dataset:Dataset) -> int:
         """ Get the input dimension of samples given to the model. """
-        example_data_point = dataset.get(0)
+        example_data_point = dataset[0]
         input_dim = example_data_point.x.shape[1]
         return input_dim
 
@@ -412,44 +447,47 @@ class Trainer():
         # Initialization
         generator = self.set_seed()
         train_loader, val_loader = self.get_dataloaders(generator)
-        model = self.get_model()
+        model = self.create_model().to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=self.config.lr)
         # Model training
+        dataloader_dict = {'train':train_loader,'val':val_loader}
         for epoch in range(self.config.epochs):
-            self.train_one_epoch(optimizer,model,train_loader,val_loader,epoch)
+            pred_dict = {'train':{'y_true':[],'y_pred':[]},
+                         'val':{'y_true':[],'y_pred':[]}}
+            for split, dataloader in dataloader_dict.items():
+                # Set training mode
+                if split == 'train':
+                    model.train()
+                    self.train_one_epoch(dataloader,epoch,model,optimizer,pred_dict,split)
+                else:
+                    model.eval()
+                    with torch.no_grad():
+                        self.train_one_epoch(dataloader,epoch,model,optimizer,pred_dict,split)
+            # Save if save path provided
+            self.save_model(model,pred_dict)
         # Release memory
         del model
 
-    def train_one_epoch(self,epoch,model,optimizer,train_loader,val_loader):
-        """ Train the model for a single epoch. """
-        dataloader_dict = {'train':train_loader,'val':val_loader}
-        pred_dict = {'train':{'y_true':torch.Tensor(),'y_pred':torch.Tensor()},
-                     'val':{'y_true':torch.Tensor(),'y_pred':torch.Tensor()}}
-        # Model training
-        for split, dataloader in dataloader_dict.items():
-            # Set training mode
+    def train_one_epoch(self,dataloader,epoch:int,model:torch.nn.Module,optimizer,pred_dict:dict,split:str):
+        """ Perfrom evaluation/training for the given split. """
+        for batch in dataloader:
+            # Forward Pass
+            batch = batch.to(self.device)
+            y_true, y_pred = batch.y, model.forward(batch)
+            loss = self.metric_calculator.compute_loss(y_true,y_pred)
+            # Update using the gradients
             if split == 'train':
-                model.train()
-            else:
-                model.eval()
-            # Batch loop
-            for batch in dataloader:
-                # Forward Pass
-                y_true, y_pred = batch.y, model.forward(batch)
-                loss = self.metric_calculator.compute_loss(y_true,y_pred)
-                # Update using the gradients
-                if split == 'train':
-                    optimizer.zero_grad()
-                    loss.backward()  
-                    optimizer.step()
-                # Update running list of targets/preds
-                pred_dict[split]['y_true'] = torch.cat((pred_dict[split]['y_true'],y_true),dim=0)
-                pred_dict[split]['y_pred'] = torch.cat((pred_dict[split]['y_pred'],y_pred),dim=0)
-            # Register metrics
-            metric_values = self.metric_calculator.compute_loss_and_metrics(pred_dict,split)
-            self.logger.update_metrics(metric_values,split)
-        # Save if save path provided
-        self.save_model(model,pred_dict)
+                optimizer.zero_grad()
+                loss.backward()  
+                optimizer.step()
+            # Update running list of targets/preds
+            pred_dict[split]['y_true'].append(y_true)
+            pred_dict[split]['y_pred'].append(y_pred)
+        # Register metrics
+        pred_dict[split]['y_true'] = torch.cat(pred_dict[split]['y_true'])
+        pred_dict[split]['y_pred'] = torch.cat(pred_dict[split]['y_pred'])
+        metric_values = self.metric_calculator.compute_loss_and_metrics(pred_dict,split)
+        self.logger.update_metrics(metric_values,split)
         
     def save_model(self,model:torch.nn.Module,pred_dict:dict):
         """ If the config allows it, save the model and register the confusion matrices. """
