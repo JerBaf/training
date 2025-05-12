@@ -1,40 +1,57 @@
 # Data
-class_names: 
-  value: ['A','B','C']
-device:
-  value: 'mps'
-fold_root_path:
-  value: '/path/to/fold/saving/location'
-label_path:
-  value: '/path/to/label/file'
-num_classes: 
+class_names: # List of class names
+  value: ['A','B','C'] 
+
+device: # Device to which the data and model will be cast
+  value: 'mps' 
+
+fold_root_path: # Path to the folder where the folds will be stored
+  value: '/path/to/fold/saving/location' 
+
+label_path: # Path to the label file, in .csv format
+  value: '/path/to/label/file.csv'
+
+num_classes: # Integer indicating number of classes if classification task
   value: 3
-num_folds:
+
+num_folds: # Integer indicating the number of folds to create/already created
   value: 4
-raw_data_path:
+
+raw_data_path: # Path to the folder where the initial dataset is stored
   value: '/path/to/non/processed/data/location'
-save_path:
+
+save_path: # Path to the folder where the models will be saved, if empty string, no models will be saved
   value: '/path/where/models/are/saved'
+
 # Metric
-metric_list: 
+metric_list: # List of metrics to register on WandB
   value: ['auc','label','loss','macro_f1','precision','pred','recall','weighted_f1']
-save_mode:
+
+save_mode: # Either 'min' or 'max', depending on the target metric. Usually 'min' if the target is loss, or 'max' if accuracy
   value: 'max'
-target_metric:
+
+target_metric: # Metric used to assess which model is best based on its relative performance on this metric
   value: 'macro_f1'
-task_type:
+
+task_type: # Either regression or classification in default implementation
   value: 'classification'
+
 # Training
-batch_size : 
+batch_size : # Integer indication the size of each data batch
   values: [32,64]
-epochs : 
+
+epochs : # Number of epochs for model training
   values: [100,150]
-lr : 
+
+lr : # Float for learning rate of optimizer
   value: 3e-3
-seed :
+
+seed : # Integer for reproducibility 
   value: 0
-# Backbone (example of extra config section)
+
+# Backbone (example of extra optionnal config section)
 dim_h :  
   values: [16,32]
+
 dropout : 
   value: 0.1
