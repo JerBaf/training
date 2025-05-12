@@ -14,15 +14,36 @@ import wandb
 from wandb.sdk.wandb_config import Config
 import yaml
 
+class Config_Wrapper():
+    def __init__(self,config):
+        self.config = config
+        for config_key, value in config.items():
+            # Dictionnary
+            if type(value) == dict:
+                if 'values' in value:
+                    setattr(self,config_key,value['values'][0])
+                else:
+                    setattr(self,config_key,value['value'])
+            # WandB
+            else:
+                setattr(self,config_key,value)
+
+    def __getitem__(self, key):
+        return self.config[key]
+    
+    def __repr__(self):
+        items = ", ".join(f"{k}={v!r}" for k, v in self.__dict__.items())
+        return f"{self.__class__.__name__}({items})"
+
 class Config_Parser():
     """ Parse and verify integrity of a config file. """
 
     CLASSIFICATION_KEYS = {'class_names','num_classes'}
     MANDATORY_KEYS = {'device','fold_root_path','label_path','num_folds','raw_data_path',
-                      'save_path','metric_list','save_mode','target_metric',
+                      'save_path','target_dim','metric_list','save_mode','target_metric',
                       'task_type','batch_size','epochs','lr','seed'}
     PATH_KEYS = {'fold_root_path','label_path','raw_data_path','save_path'}
-    VALUE_ONLY_KEYS = CLASSIFICATION_KEYS.union(PATH_KEYS).union({'device','num_folds','metric_list','save_mode','target_metric','task_type'})
+    VALUE_ONLY_KEYS = CLASSIFICATION_KEYS.union(PATH_KEYS).union({'device','num_folds','metric_list','save_mode','target_dim','target_metric','task_type'})
     
     def __init__(self,config_path:str):
         self.config_path = config_path
@@ -38,11 +59,11 @@ class Config_Parser():
         # Validate config integrity
         try:
             self.validate_config(config)
-            return config
+            return Config_Wrapper(config)
         except Exception as exc:
             raise ValueError(f"Invalid config configuration") from exc
             
-    def validate_config(self,config:dict) -> bool:
+    def validate_config(self,config:dict):
         """ Verify the integrity of a config file. """
         # Check required entries
         missing_entries = self.MANDATORY_KEYS.difference(set(config.keys()))
@@ -56,12 +77,11 @@ class Config_Parser():
             if 'values' in values_dict and type(values_dict['values']) != list:
                 raise ValueError(f"The config entry {key} has 'values' specified but no list of parameters is given.")
         # Check value entry
-        self.validate_value_entry()
+        self.validate_value_entry(config)
         # Check path is correct
         self.validate_path(config)
         # Check label file 
         self.validate_labels(config)
-        return True 
     
     def validate_labels(self,config:dict):
         """ Validate the format of the label files. """
@@ -76,12 +96,12 @@ class Config_Parser():
 
     def validate_path(self,config:dict):
         """ Raise an Exception if the provided path is not valid. """
-        for path in list(self.PATH_KEYS):
-            if 'values' in config[path]:
-                raise ValueError(f"The config file has multiple paths for entry {path}. Only support one path at a time with 'value' keyword.")
-            path = config[path]['value']
-            if not os.path.exists(path) and not (path == 'save_path' and path == ''):
-                raise ValueError(f'The config provided non existing path for entry {path}: {path}. Please create it prior to processing.')
+        for path_key in list(self.PATH_KEYS):
+            if 'values' in config[path_key]:
+                raise ValueError(f"The config file has multiple paths for entry {path_key}. Only support one path at a time with 'value' keyword.")
+            path = config[path_key]['value']
+            if not os.path.exists(path) and not (path_key == 'save_path' and path == ''):
+                raise ValueError(f'The config provided non existing path for entry {path_key}: {path}. Please create it prior to processing.')
         
     def validate_value_entry(self,config:dict):
         """ Verify that all entries requiring value only are valid. """ 
@@ -92,12 +112,12 @@ class Config_Parser():
 class Fold_Manager():
     """ Create and pre-process the folds prior to cross-validation. """
 
-    def __init__(self,config:dict):
+    def __init__(self,config:Config_Wrapper):
         self.config = config
     
     def is_created(self):
         """ Boolean indicator if the fold structure has been created. """
-        fold_root_path = self.config['fold_root_path']['value']
+        fold_root_path = self.config.fold_root_path
         return os.path.exists(os.path.join(fold_root_path,'0'))
 
     def fold_creation(self,fold_root_path:str,raw_data_path:str):
@@ -106,9 +126,9 @@ class Fold_Manager():
         if self.is_created():
             return
         # List files
-        file_dict = dict([(f.strip('.csv'),os.path.join(raw_data_path,f)) for f in os.listdir(raw_data_path)])
+        file_dict = dict([(int(f.removesuffix('.csv')),os.path.join(raw_data_path,f)) for f in os.listdir(raw_data_path)])
         # Retrieve label mapping
-        label_path = self.config['label_path']['value']
+        label_path = self.config.label_path
         labels_df = pd.read_csv(label_path).set_index('id')
         # Regroup files per label
         stratified_files = dict()
@@ -118,12 +138,11 @@ class Fold_Manager():
                 stratified_files[file_label] = []
             stratified_files[file_label].append(file_id)
         # Shuffle label-associated file lists
-        seed = self.config['seed']['values'][0] if 'values' in self.config['seed'] else self.config['seed']['value']
-        generator = np.random.default_rng(seed)
+        generator = np.random.default_rng(self.config.seed)
         for label in stratified_files.keys():
             generator.shuffle(stratified_files[label])
         # Split per fold
-        num_folds = self.config['num_folds']['values'][0] if 'values' in self.config['num_folds'] else self.config['num_folds']['value']
+        num_folds = self.config.num_folds
         for i in range(num_folds):
             fold_train_ids = []
             fold_val_ids = []
@@ -154,125 +173,30 @@ class Fold_Manager():
 
     def process_folds(self):
         """ Process each folds individually. """
-        fold_root_path = self.config['fold_root_path']['value']
-        label_path = self.config['label_path']['value']
-        raw_data_path = self.config['raw_data_path']['value']
+        fold_root_path = self.config.fold_root_path
+        label_path = self.config.label_path
+        raw_data_path = self.config.raw_data_path
         if not self.is_created():
             self.fold_creation(fold_root_path,raw_data_path)
         # Process files
         for fold_id in [d for d in os.listdir(fold_root_path) if os.path.isdir(os.path.join(fold_root_path,d))]:
             fold_path = os.path.join(fold_root_path,fold_id)
-            _, _ = Fold_Manager.get_fold_dataset(fold_path,label_path)
+            _, _ = self.__class__.get_fold_dataset(fold_path,label_path)
      
     @classmethod
     def get_fold_dataset(cls,fold_path:str,label_path:str) -> tuple:
         """ Retrieve the train and validation dataset for a given fold. """
         return None, None
-
-class Grid_Search():
-    """ Grid search object that implements cross-validation search with WandB sweeps. """
-    
-    def __init__(self,config_path:str,name:str,method:str='grid',config_parser_cls=Config_Parser,
-                 fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator,
-                 trainer_cls=Trainer):
-        # Classes
-        self.config_parser_cls = config_parser_cls
-        self.fold_manager_cls = fold_manager_cls
-        self.logger_cls = logger_cls
-        self.metric_calculator_cls = metric_calculator_cls
-        self.trainer_cls = trainer_cls
-        # Attributes
-        self.config = config_parser_cls(config_path).parse_config()
-        fold_manager_cls(self.config).process_folds()
-        self.method = method
-        self.name = name
-
-    def create_sweep_config(self) -> dict:
-        """ Create the sweep config for the wandb grid search.
-        
-            :param config: Dictionnary with the parameters list and their corresponding list of value to be tested.
-            :param method: Method for the search of hyperparameter, default is grid.
-            
-            :return: Sweep config for wandb agent in dictionnary format.
-        
-        """
-        sweep_config = {'method': self.method}
-        metric = {'name': 'Loss','goal': 'minimize'}
-        sweep_config['metric'] = metric
-        sweep_config['parameters'] = self.config
-        return sweep_config
-
-    def launch(self):
-        """ Hyper parameter search with cross-validation for a GNN. """
-        # Process to cross validation
-        std_dict = dict()
-        config = self.config
-        for fold_id in range(config.num_folds):
-            # Instantiate metric registration
-            sweep_config = self.create_sweep_config()
-            sweep_id = wandb.sweep(sweep_config, project=self.name)
-            # Launch training
-            wandb.agent(sweep_id,partial(self.training_single_fold,fold_id=fold_id,std_dict=std_dict))
-        # Log standard deviations
-        sweep_config = self.create_sweep_config()
-        sweep_id = wandb.sweep(sweep_config, project=self.name)
-        wandb.agent(sweep_id,partial(self.std_logging,std_dict=std_dict))
-
-    def std_logging(self,config:Config=None,std_dict:Optional[dict]=None):
-        """ Register the std for all metrics. """
-        std_dict = {} if std_dict is None else std_dict
-        # Log standard deviations
-        with wandb.init(config=config):
-            for metric_key, metric_values in std_dict.items():
-                wandb.log({f'{metric_key}_std':np.std(metric_values)})
-            
-    def training_single_fold(self,config:Config=None,fold_id:int=0,std_dict:Optional[dict]=None):
-        """ Training and metric registration for a single fold
-            
-            :param config: Wandb config for the hyperparameter search.
-            :param fold_id: Id of the fold for this training.
-            :param std_dict: Dictionnary to keep track of metric values for latter std computation.
-        
-        """
-        std_dict = {} if std_dict is None else std_dict
-        with wandb.init(config=config):
-            config = wandb.config
-            # Perform training
-            trainer = self.trainer_cls(config,fold_id,self.fold_manager_cls,self.logger_cls,self.metric_calculator_cls)
-            trainer.train()
-            # Assign target specific variables
-            metric_list = trainer.logger.get_metric_list()
-            fold_metric_dict = trainer.logger.fold_metric_dict
-            # Log global metrics
-            global_metric_dict = dict()
-            for metric_name, metric_values in fold_metric_dict.items():
-                if metric_name in metric_list:
-                    if config.task_type == 'classification':
-                        if 'loss' in metric_name:
-                            metric_key = f'min_{metric_name}'
-                            global_metric_dict[metric_key] = np.min(metric_values)
-                        else:
-                            metric_key = f'max_{metric_name}'
-                            global_metric_dict[metric_key] = np.max(metric_values)
-                    else:
-                        metric_key = f'min_{metric_name}'
-                        global_metric_dict[metric_key] = np.min(metric_values)
-                    # Register to standard deviation dictionnary
-                    if metric_key not in std_dict:
-                        std_dict[metric_key] = []
-                    std_dict[metric_key].append(np.min(metric_values))
-            wandb.log(global_metric_dict)
-            wandb.log({'fold_id':fold_id})
-    
+   
 class Logger():
     """ Class to log the results through wandb. """
 
     CLASS_ASSOCIATED_METRICS = {'recall','precision'}
 
-    def __init__(self,config:Config):
+    def __init__(self,config:Config_Wrapper):
         self.config = config
-        self.fold_metric_dict = self.create_metric_dict()
         self.metric_list = config.metric_list
+        self.fold_metric_dict = self.create_metric_dict()
 
     def create_metric_dict(self) -> dict:
         """ Create a dictionnary to register metrics. """
@@ -294,7 +218,7 @@ class Logger():
         """ Register the confusion matrices on wandb. """
         if self.config.task_type == 'classification':
             for split in ['train','val']:
-                y_true, y_pred = pred_dict[split]['y_true'], pred_dict[split]['y_pred']
+                y_true, y_pred = pred_dict[split]['y_true'].argmax(dim=1).detach().cpu().numpy(), pred_dict[split]['y_pred'].argmax(dim=1).detach().cpu().numpy()
                 wandb.log({f"{split}_conf_mat" : wandb.plot.confusion_matrix(probs=None,
                                                     y_true=y_true, preds=y_pred,
                                                     class_names=self.config.class_names)})
@@ -311,7 +235,7 @@ class Logger():
 class Metric_Calculator():
     """ Compute the metrics before passing them to optimizer and logger. """
 
-    def __init__(self,config:Config):
+    def __init__(self,config:Config_Wrapper):
         self.config = config
 
     def compute_loss(self,y_true:torch.Tensor,y_pred:torch.Tensor) -> torch.Tensor:
@@ -319,7 +243,7 @@ class Metric_Calculator():
         loss = None
         return loss
 
-    def compute_loss_and_metrics(self,pred_dict:dict,split:str) -> tuple:
+    def compute_loss_and_metrics(self,pred_dict:dict,split:str) -> dict:
         """ Compute loss and task-associated metrics. """
         # Compute task-associated metrics
         y_true, y_pred = pred_dict[split]['y_true'], pred_dict[split]['y_pred']
@@ -328,7 +252,7 @@ class Metric_Calculator():
         else:
             metric_dict = self.compute_regression_metric(y_true,y_pred)
         # Compute loss
-        loss = self.compute_loss(y_true,y_pred)
+        loss = self.compute_loss(y_true,y_pred).cpu().detach()
         metric_dict['loss'] = loss
         return metric_dict
 
@@ -344,16 +268,16 @@ class Metric_Calculator():
         probs = Softmax(dim=-1)(torch.from_numpy(pred_np)).numpy()
         preds = probs.argmax(axis=1)
         # Retrieve label list
-        label_list = [str(i) for i in range(self.config.num_classes)] 
+        label_list = self.config.class_names
         # Metrics computation
         metric_dict = dict()
-        metrics = classification_report(labels,preds,labels=label_list,output_dict=True)
+        metrics = classification_report(labels,preds,target_names=label_list,output_dict=True)
         # Compute AUC
         if len(label_list) == 2:
             probs = probs[:,1]
             auc = roc_auc_score(labels,probs)
         else:
-            auc = roc_auc_score(labels,probs,multi_class='ovo',labels=[int(l) for l in label_list])    
+            auc = roc_auc_score(labels,probs,multi_class='ovo',labels=range(len(label_list)))    
         # Retrieve averages
         macro_f1 = metrics['macro avg']['f1-score']
         weighted_f1 = metrics['weighted avg']['f1-score']
@@ -385,7 +309,7 @@ class Metric_Calculator():
 class Trainer():
     """ Class to perform the training for one given fold. """
 
-    def __init__(self,config:Config,fold_id:int,fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator):
+    def __init__(self,config:Config_Wrapper,fold_id:int,fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator):
         # Attributes
         self.config = config
         self.device = torch.device(config.device)
@@ -400,14 +324,14 @@ class Trainer():
         # Compute label distribution
         for idx in range(len(dataset)):
             data = dataset[idx]
-            label = torch.argmax(data[-1].y).item()
+            label = torch.argmax(data.y).item()
             labels[label] += 1
         # Compute weights
         weights = dict([(k,len(dataset)/v) for k,v in labels.items()])
         weight_list = []
         for idx in range(len(dataset)):
             data = dataset[idx]
-            label = torch.argmax(data[-1].y).item()
+            label = torch.argmax(data.y).item()
             weight_list.append(weights[label])
         return WeightedRandomSampler(weight_list,len(dataset))
 
@@ -418,7 +342,7 @@ class Trainer():
 
     def get_datasets(self) -> tuple :
         """ Retrieve the train and validation dataset. """
-        fold_path = os.path.join(self.config.fold_root_path,self.fold_id)
+        fold_path = os.path.join(self.config.fold_root_path,str(self.fold_id))
         label_path = self.config.label_path
         return self.fold_manager_cls.get_fold_dataset(fold_path,label_path)
 
@@ -473,7 +397,7 @@ class Trainer():
         for batch in dataloader:
             # Forward Pass
             batch = batch.to(self.device)
-            y_true, y_pred = batch.y, model.forward(batch)
+            y_true, y_pred = batch.y.reshape((-1,self.config.num_classes)), model(batch)
             loss = self.metric_calculator.compute_loss(y_true,y_pred)
             # Update using the gradients
             if split == 'train':
@@ -504,3 +428,100 @@ class Trainer():
         generator = torch.Generator()
         generator.manual_seed(seed)
         return generator
+
+class Grid_Search():
+    """ Grid search object that implements cross-validation search with WandB sweeps. """
+    
+    def __init__(self,config_path:str,name:str,method:str='grid',config_parser_cls=Config_Parser,
+                 fold_manager_cls=Fold_Manager,logger_cls=Logger,metric_calculator_cls=Metric_Calculator,
+                 trainer_cls=Trainer):
+        # Classes
+        self.config_parser_cls = config_parser_cls
+        self.fold_manager_cls = fold_manager_cls
+        self.logger_cls = logger_cls
+        self.metric_calculator_cls = metric_calculator_cls
+        self.trainer_cls = trainer_cls
+        # Attributes
+        self.config_wrapper = config_parser_cls(config_path).parse_config()
+        self.config = self.config_wrapper.config
+        fold_manager_cls(self.config_wrapper).process_folds()
+        self.method = method
+        self.name = name
+
+    def create_sweep_config(self) -> dict:
+        """ Create the sweep config for the wandb grid search.
+        
+            :param config: Dictionnary with the parameters list and their corresponding list of value to be tested.
+            :param method: Method for the search of hyperparameter, default is grid.
+            
+            :return: Sweep config for wandb agent in dictionnary format.
+        
+        """
+        sweep_config = {'method': self.method}
+        metric = {'name': 'Loss','goal': 'minimize'}
+        sweep_config['metric'] = metric
+        sweep_config['parameters'] = self.config
+        return sweep_config
+
+    def launch(self):
+        """ Hyper parameter search with cross-validation for a GNN. """
+        # Process to cross validation
+        std_dict = dict()
+        config = self.config
+        for fold_id in range(config['num_folds']['value']):
+            # Instantiate metric registration
+            sweep_config = self.create_sweep_config()
+            sweep_id = wandb.sweep(sweep_config, project=self.name)
+            # Launch training
+            wandb.agent(sweep_id,partial(self.training_single_fold,fold_id=fold_id,std_dict=std_dict))
+        # Log standard deviations
+        sweep_config = self.create_sweep_config()
+        sweep_id = wandb.sweep(sweep_config, project=self.name)
+        wandb.agent(sweep_id,partial(self.std_logging,std_dict=std_dict))
+
+    def std_logging(self,config:Config=None,std_dict:Optional[dict]=None):
+        """ Register the std for all metrics. """
+        std_dict = {} if std_dict is None else std_dict
+        # Log standard deviations
+        with wandb.init(config=config):
+            for metric_key, metric_values in std_dict.items():
+                wandb.log({f'{metric_key}_std':np.std(metric_values)})
+            
+    def training_single_fold(self,config:Config=None,fold_id:int=0,std_dict:Optional[dict]=None):
+        """ Training and metric registration for a single fold
+            
+            :param config: Wandb config for the hyperparameter search.
+            :param fold_id: Id of the fold for this training.
+            :param std_dict: Dictionnary to keep track of metric values for latter std computation.
+        
+        """
+        std_dict = {} if std_dict is None else std_dict
+        with wandb.init(config=config):
+            config = Config_Wrapper(wandb.config)
+            # Perform training
+            trainer = self.trainer_cls(config,fold_id,self.fold_manager_cls,self.logger_cls,self.metric_calculator_cls)
+            trainer.train()
+            # Assign target specific variables
+            metric_list = trainer.logger.get_metric_list()
+            fold_metric_dict = trainer.logger.fold_metric_dict
+            # Log global metrics
+            global_metric_dict = dict()
+            for metric_name, metric_values in fold_metric_dict.items():
+                if metric_name in metric_list:
+                    if config.task_type == 'classification':
+                        if 'loss' in metric_name:
+                            metric_key = f'min_{metric_name}'
+                            global_metric_dict[metric_key] = np.min(metric_values)
+                        else:
+                            metric_key = f'max_{metric_name}'
+                            global_metric_dict[metric_key] = np.max(metric_values)
+                    else:
+                        metric_key = f'min_{metric_name}'
+                        global_metric_dict[metric_key] = np.min(metric_values)
+                    # Register to standard deviation dictionnary
+                    if metric_key not in std_dict:
+                        std_dict[metric_key] = []
+                    std_dict[metric_key].append(np.min(metric_values))
+            wandb.log(global_metric_dict)
+            wandb.log({'fold_id':fold_id})
+ 
