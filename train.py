@@ -252,7 +252,7 @@ class Metric_Calculator():
         else:
             metric_dict = self.compute_regression_metric(y_true,y_pred)
         # Compute loss
-        loss = self.compute_loss(y_true,y_pred).cpu().detach()
+        loss = self.compute_loss(y_true,y_pred).detach().cpu()
         metric_dict['loss'] = loss
         return metric_dict
 
@@ -405,8 +405,8 @@ class Trainer():
                 loss.backward()  
                 optimizer.step()
             # Update running list of targets/preds
-            pred_dict[split]['y_true'].append(y_true)
-            pred_dict[split]['y_pred'].append(y_pred)
+            pred_dict[split]['y_true'].append(y_true.detach().cpu())
+            pred_dict[split]['y_pred'].append(y_pred.detach().cpu())
         # Register metrics
         pred_dict[split]['y_true'] = torch.cat(pred_dict[split]['y_true'])
         pred_dict[split]['y_pred'] = torch.cat(pred_dict[split]['y_pred'])
@@ -416,7 +416,7 @@ class Trainer():
     def save_model(self,model:torch.nn.Module,pred_dict:dict):
         """ If the config allows it, save the model and register the confusion matrices. """
         if self.config.save_path != '' and self.is_best_model():
-            torch.save(model,os.path.join(self.config.save_path,f'best_model_fold_{self.fold_id}.pth'))
+            torch.save(model.state_dict(),os.path.join(self.config.save_path,f'best_model_fold_{self.fold_id}.pth'))
             self.logger.log_confusion_matrix(pred_dict)
         
     def set_seed(self) -> torch.Generator:

@@ -37,7 +37,7 @@ task_type: # Either regression or classification in default implementation
   value: 'classification'
 
 # Training
-batch_size : # Integer indication the size of each data batch
+batch_size : # Integer indicating the size of each data batch
   values: [32,64]
 
 epochs : # Number of epochs for model training
