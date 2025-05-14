@@ -396,7 +396,7 @@ class Trainer():
         """ Perfrom evaluation/training for the given split. """
         for batch in dataloader:
             # Forward Pass
-            batch = batch.to(self.device)
+            batch = batch.to(self.device,non_blocking=True)
             y_true, y_pred = batch.y.reshape((-1,self.config.num_classes)), model(batch)
             loss = self.metric_calculator.compute_loss(y_true,y_pred)
             # Update using the gradients
@@ -405,11 +405,11 @@ class Trainer():
                 loss.backward()  
                 optimizer.step()
             # Update running list of targets/preds
-            pred_dict[split]['y_true'].append(y_true.detach().cpu())
-            pred_dict[split]['y_pred'].append(y_pred.detach().cpu())
+            pred_dict[split]['y_true'].append(y_true)
+            pred_dict[split]['y_pred'].append(y_pred)
         # Register metrics
-        pred_dict[split]['y_true'] = torch.cat(pred_dict[split]['y_true'])
-        pred_dict[split]['y_pred'] = torch.cat(pred_dict[split]['y_pred'])
+        pred_dict[split]['y_true'] = torch.cat(pred_dict[split]['y_true']).detach().to('cpu')
+        pred_dict[split]['y_pred'] = torch.cat(pred_dict[split]['y_pred']).detach().to('cpu')
         metric_values = self.metric_calculator.compute_loss_and_metrics(pred_dict,split)
         self.logger.update_metrics(metric_values,split)
         
@@ -496,7 +496,7 @@ class Grid_Search():
         
         """
         std_dict = {} if std_dict is None else std_dict
-        with wandb.init(config=config):
+        with wandb.init(config=config,settings=wandb.Settings(_disable_stats=True, _disable_meta=True,)):
             config = Config_Wrapper(wandb.config)
             # Perform training
             trainer = self.trainer_cls(config,fold_id,self.fold_manager_cls,self.logger_cls,self.metric_calculator_cls)
@@ -524,4 +524,5 @@ class Grid_Search():
                     std_dict[metric_key].append(np.min(metric_values))
             wandb.log(global_metric_dict)
             wandb.log({'fold_id':fold_id})
+        wandb.finish()
  

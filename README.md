@@ -13,6 +13,33 @@ Each classes (or module) has a default implementation that can be overriden. The
 hadhock due to dataset specifities. You will need to implement a few custom functions as indicated in the corresponding
 section in the README.
 
+### Module Structure
+
+##### Config Parser
+
+The `Config Parser` main goal is to parse and validate the config file provided by the user. It will check some key properties, such as 
+consistency between `value` and `values` keywords, path existance, etc. This requires no modification by the user for regular usage.
+
+##### Fold Manager
+
+The `Fold Manager` is in charge of creating the fold structure for cross-validation and process the raw data to convert it from `.csv` files to Pytorch Geometric graphs in `.pt` format. Check the following [webpage](https://pytorch-geometric.readthedocs.io/en/latest/notes/create_dataset.html#creating-larger-datasets) if you want more information on standard practice for Pytorch Geometric Dataset implementation.
+
+##### Logger
+
+The `Logger` module handles the logging of metrics using [Weights and Biases (WandB)](https://wandb.ai/). It already implements logging of key metrics for classification and regression tasks. The default implementation requires no modification by the user, except if the task is outside of the initial scope of classification and regression.
+
+##### Metric Calculator
+
+The `Metric Calculator` has two main purposes. The first is to compute the loss to optimize during model training. The second is to compute all the metrics associated to the given taks.
+
+##### Trainer
+
+The `Trainer` module is the core of the library. It handles the training procedure per fold and orchestrate the metrics computation and logging. The default implementation has a training loop already implemented but it may not suit all cases.
+
+##### Grid Search
+
+The `Grid Search` module handles the hyperparameter selection and is the only component of the pipeline that needs to be instantiated by the user. Then, a single call to its `launch()` function will perform the cross-validation using the given config file.
+
 ### Usage
 
 ##### Config
@@ -27,21 +54,22 @@ Among the different constraints on the parameters of the Grid Search, some of th
 
 | Parameter            | Description                                         | Mandatory              | Value Only |
 | :----------------    | :------                                             | :----:                 | :----:     |
+| `batch_size`         |  Integer indicating the size of each data batch     | `True`                 | `False`    |
 | `class_names`        |  List of names for each class                       | Only if classification | `True`     |
+| `epochs`             |  Number of epochs for model training                | `True`                 | `False`    |
 | `device`             |  Device to which the data and model will be cast    | `True`                 | `True`     |
 | `fold_root_path`     |  Path to the folder where the folds will be stored  | `True`                 | `True`     |
+| `lr`                 |  Float for learning rate of optimizer               | `True`                 | `False`    |
+| `metric_list`        |  List of metrics to register on WandB               | `True`                 | `True`     |
 | `num_classes`        |  Total number of classes                            | Only if classification | `True`     |
 | `num_folds`          |  Number of folds for cross-validation               | `True`                 | `True`     |
 | `raw_data_path`      |  Path to the folder where the raw dataset is stored | `True`                 | `True`     |
 | `save_path`          |  Path to the folder where the models will be saved  | `True`                 | `True`     |
-| `metric_list`        |  List of metrics to register on WandB               | `True`                 | `True`     |
 | `save_mode`          | 'min' or 'max', depending on the target metric.     | `True`                 | `True`     |
+| `seed`               |  Integer to control reproducibility                 | `True`                 | `False`    |
 | `target_metric`      |  Metric used to assess which model is best          | `True`                 | `True`     |
 | `task_type`          |  Either regression or classification                | `True`                 | `True`     |
-| `batch_size`         |  Integer indicating the size of each data batch     | `True`                 | `False`    |
-| `epochs`             |  Number of epochs for model training                | `True`                 | `False`    |
-| `lr`                 |  Float for learning rate of optimizer               | `True`                 | `False`    |
-| `seed`               |  Integer to control reproducibility                 | `True`                 | `False`    |
+
 
 
 ##### Data
@@ -55,19 +83,3 @@ with at least two columns: `[id,label]`. The id column must match the file ids u
 
 ##### Standard practice
 
-### Module Structure
-
-##### Config Parser
-
-Its main goal is to parse and validate the config file provided by the user. It will check some key properties, such as 
-consistency between `value` and `values` keywords, path existance, etc. This requires no modification by the user for regular usage.
-
-##### Fold Manager
-
-##### Logger
-
-##### Metric Calculator
-
-##### Trainer
-
-##### Grid Search
