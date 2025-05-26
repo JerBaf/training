@@ -40,10 +40,10 @@ class Config_Parser():
 
     CLASSIFICATION_KEYS = {'class_names','num_classes'}
     MANDATORY_KEYS = {'device','fold_root_path','label_path','num_folds','raw_data_path',
-                      'save_path','target_dim','metric_list','save_mode','target_metric',
+                      'save_path','metric_list','save_mode','target_metric',
                       'task_type','batch_size','epochs','lr','seed'}
     PATH_KEYS = {'fold_root_path','label_path','raw_data_path','save_path'}
-    VALUE_ONLY_KEYS = CLASSIFICATION_KEYS.union(PATH_KEYS).union({'device','num_folds','metric_list','save_mode','target_dim','target_metric','task_type'})
+    VALUE_ONLY_KEYS = CLASSIFICATION_KEYS.union(PATH_KEYS).union({'device','num_folds','metric_list','save_mode','target_metric','task_type'})
     
     def __init__(self,config_path:str):
         self.config_path = config_path
@@ -393,7 +393,7 @@ class Trainer():
         del model
 
     def train_one_epoch(self,dataloader,epoch:int,model:torch.nn.Module,optimizer,pred_dict:dict,split:str):
-        """ Perfrom evaluation/training for the given split. """
+        """ Perform evaluation/training for the given split. """
         for batch in dataloader:
             # Forward Pass
             batch = batch.to(self.device,non_blocking=True)
@@ -417,8 +417,9 @@ class Trainer():
         """ If the config allows it, save the model and register the confusion matrices. """
         if self.config.save_path != '' and self.is_best_model():
             torch.save(model.state_dict(),os.path.join(self.config.save_path,f'best_model_fold_{self.fold_id}.pth'))
-            self.logger.log_confusion_matrix(pred_dict)
-        
+            if self.config.task_type == 'classification':
+                self.logger.log_confusion_matrix(pred_dict)
+
     def set_seed(self) -> torch.Generator:
         """ Setup reproducibility for a set of libraries. """
         seed = self.config.seed
